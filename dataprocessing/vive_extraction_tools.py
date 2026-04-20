@@ -430,6 +430,90 @@ def compute_hinge_angle(r_joint: R, flexion_axis: np.ndarray,
     return np.degrees(angles) if degrees else angles
 
 
+def get_axis_in_world(quaternions: np.ndarray, local_axis: np.ndarray) -> np.ndarray:
+    """
+    Rotate a fixed local axis into world space for each frame.
+
+    Args:
+        quaternions: Nx4 array in (w, x, y, z) convention.
+        local_axis:  (3,) vector in the tracker's local frame (need not be unit).
+
+    Returns:
+        Nx3 array of unit vectors — the local axis expressed in world space at
+        each frame.
+    """
+    local_axis = np.asarray(local_axis, dtype=float)
+    local_axis = local_axis / np.linalg.norm(local_axis)
+
+    rots = R.from_quat(quaternions[:, [1, 2, 3, 0]])   # (x,y,z,w) for scipy
+    return rots.apply(local_axis)                        # Nx3
+
+
+def compute_axis_flexion(quat_proximal: np.ndarray,
+                         local_axis_prox: np.ndarray,
+                         quat_distal: np.ndarray,
+                         local_axis_dist: np.ndarray,
+                         ref_quat_prox: np.ndarray,
+                         ref_quat_dist: np.ndarray,
+                         degrees: bool = True) -> np.ndarray:
+    """
+    Compute the flexion angle as the change in the angle between a chosen local
+    axis on each tracker, relative to the angle measured during the still
+    calibration window.
+
+    Method
+    ------
+    1. For every frame, rotate each tracker's chosen local axis into world space.
+    2. Compute the angle between the two world-space axes via arccos of their dot
+       product.  This gives a value in [0°, 180°].
+    3. Subtract the reference angle (same calculation applied to the calibration
+       quaternions) so that the output is 0° when the subject is in the neutral
+       standing pose.
+
+    This approach is independent of the arbitrary mounting orientation of each
+    tracker because only the *chosen* local axis — e.g. the axis that points
+    roughly along the limb segment — is used.
+
+    Args:
+        quat_proximal:   Nx4 (w, x, y, z) — world-frame quaternions of the
+                         proximal tracker at every frame.
+        local_axis_prox: (3,) vector in the proximal tracker's local frame
+                         (e.g. (0,0,1) for Z axis).
+        quat_distal:     Nx4 (w, x, y, z) — world-frame quaternions of the
+                         distal tracker at every frame.
+        local_axis_dist: (3,) vector in the distal tracker's local frame
+                         (e.g. (0,0,1) or (-1,0,0)).
+        ref_quat_prox:   (4,) mean quaternion (w, x, y, z) for the proximal
+                         tracker during the still calibration window.
+        ref_quat_dist:   (4,) mean quaternion (w, x, y, z) for the distal
+                         tracker during the still calibration window.
+        degrees:         If True, return degrees; otherwise radians.
+
+    Returns:
+        (N,) array — flexion angle change from neutral pose (positive = opening
+        angle between the two axes increasing from the reference).
+    """
+    local_axis_prox = np.asarray(local_axis_prox, dtype=float)
+    local_axis_dist = np.asarray(local_axis_dist, dtype=float)
+    local_axis_prox = local_axis_prox / np.linalg.norm(local_axis_prox)
+    local_axis_dist = local_axis_dist / np.linalg.norm(local_axis_dist)
+
+    # World-space axes at every frame
+    prox_axes = get_axis_in_world(quat_proximal, local_axis_prox)   # Nx3
+    dist_axes = get_axis_in_world(quat_distal,   local_axis_dist)   # Nx3
+
+    dots   = np.clip(np.einsum('ij,ij->i', prox_axes, dist_axes), -1.0, 1.0)
+    angles = np.arccos(dots)                                         # N, radians
+
+    # Reference angle from the still calibration quaternions
+    ref_prox_world = R.from_quat(ref_quat_prox[[1, 2, 3, 0]]).apply(local_axis_prox)
+    ref_dist_world = R.from_quat(ref_quat_dist[[1, 2, 3, 0]]).apply(local_axis_dist)
+    ref_angle      = np.arccos(np.clip(np.dot(ref_prox_world, ref_dist_world), -1.0, 1.0))
+
+    flexion = angles - ref_angle
+    return np.degrees(flexion) if degrees else flexion
+
+
 def plot_tracker_positions(npz_path: str, tracker_name: str = None,
                            axes: tuple = (0, 1, 2)) -> None:
     """

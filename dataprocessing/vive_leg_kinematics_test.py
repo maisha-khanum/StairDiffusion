@@ -3,11 +3,9 @@ import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
-from scipy.spatial.transform import Rotation as R
 
 sys.path.insert(0, os.path.dirname(__file__))
 from vive_leg_kinematics import compute_flexion
-from vive_extraction_tools import find_flexion_axis
 
 
 def plot_tracker_positions_3d(results: list[tuple[str, dict]], title: str = '') -> None:
@@ -65,71 +63,6 @@ def plot_tracker_positions_3d(results: list[tuple[str, dict]], title: str = '') 
     plt.tight_layout()
     plt.show()
 
-
-def compute_windowed_flexion_axes(result: dict, stride: int = 200,
-                                  window: int = 200) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Compute the PCA flexion axis in rolling windows across the recording.
-
-    Args:
-        result: Output of compute_flexion (must contain 'joint_quat' and 't_s').
-        stride: Step between window centres in samples.
-        window: Number of samples per window.
-
-    Returns:
-        t_centres: 1-D array of timestamps at each window centre.
-        axes:      Nx3 array of unit flexion-axis vectors, one per window.
-    """
-    quats_wxyz = result['joint_quat']   # Nx4 (w,x,y,z)
-    t          = result['t_s']
-    n          = len(quats_wxyz)
-
-    centres, axes = [], []
-    for start in range(0, n - window, stride):
-        end     = start + window
-        window_q = R.from_quat(quats_wxyz[start:end, [1, 2, 3, 0]])  # (x,y,z,w) for scipy
-        axis    = find_flexion_axis(window_q)
-        centres.append(t[start + window // 2])
-        axes.append(axis)
-
-    return np.array(centres), np.array(axes)
-
-
-def plot_flexion_axis_evolution_3d(t_centres: np.ndarray, axes: np.ndarray,
-                                   title: str = 'Flexion axis over time') -> None:
-    """
-    3D quiver plot of the flexion axis at each window, coloured by time.
-    All arrows originate from the origin — only direction matters.
-    """
-    fig = plt.figure(figsize=(9, 7))
-    ax  = fig.add_subplot(111, projection='3d')
-
-    t_norm = (t_centres - t_centres[0]) / (t_centres[-1] - t_centres[0])
-    cmap   = plt.cm.plasma
-
-    for axis, tn in zip(axes, t_norm):
-        color = cmap(tn)
-        ax.quiver(0, 0, 0, *axis, length=0.8, normalize=True,
-                  color=color, linewidth=1.2, arrow_length_ratio=0.15)
-
-    # Unit-sphere wireframe for reference
-    u = np.linspace(0, 2 * np.pi, 30)
-    v = np.linspace(0, np.pi, 20)
-    xs = np.outer(np.cos(u), np.sin(v))
-    ys = np.outer(np.sin(u), np.sin(v))
-    zs = np.outer(np.ones_like(u), np.cos(v))
-    ax.plot_surface(xs, ys, zs, alpha=0.04, color='gray')
-
-    ax.set_xlim(-1, 1); ax.set_ylim(-1, 1); ax.set_zlim(-1, 1)
-    ax.set_xlabel('X'); ax.set_ylabel('Y'); ax.set_zlabel('Z')
-    ax.set_title(title)
-
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(t_centres[0], t_centres[-1]))
-    sm.set_array([])
-    fig.colorbar(sm, ax=ax, pad=0.1, shrink=0.6, label='Time (s)')
-
-    plt.tight_layout()
-    plt.show()
 
 
 def animate_tracker_frames(knee: dict, ankle: dict,
@@ -254,11 +187,16 @@ def plot_joint_flexion(knee: dict, ankle: dict, title: str = '') -> None:
 
 if __name__ == '__main__':
     DATASET = '/home/maisha/StairDiffusion/npz/calib'
-    
+    DATASET = '/home/maisha/StairDiffusion/npz/walk_full'
+    DATASET = '/home/maisha/StairDiffusion/npz/walk_full_vid'
+
+
     npz = os.path.join(DATASET, os.path.basename(DATASET) + '.npz')
 
-    knee  = compute_flexion(npz, proximal='waist',      distal='right_knee')
-    ankle = compute_flexion(npz, proximal='right_knee', distal='right_foot')
+    knee  = compute_flexion(npz, proximal='waist',      distal='right_knee',
+                            proximal_axis=(0, 0, 1), distal_axis=(0, 0, 1))
+    ankle = compute_flexion(npz, proximal='right_knee', distal='right_foot',
+                            proximal_axis=(0, 0, 1), distal_axis=(-1, 0, 0))
 
     for label, r in [('Knee', knee), ('Ankle', ankle)]:
         ang = r['flexion_deg']
@@ -268,11 +206,3 @@ if __name__ == '__main__':
     plot_joint_flexion(knee, ankle, title=os.path.basename(DATASET))
 
     animate_tracker_frames(knee, ankle, title=os.path.basename(DATASET))
-
-
-    # t_centres, axes = compute_windowed_flexion_axes(knee, stride=200, window=200)
-    # plot_flexion_axis_evolution_3d(t_centres, axes, title=f'Knee flexion axis — {os.path.basename(DATASET)}')
-
-
-    # t_centres, axes = compute_windowed_flexion_axes(ankle, stride=200, window=200)
-    # plot_flexion_axis_evolution_3d(t_centres, axes, title=f'Ankle flexion axis — {os.path.basename(DATASET)}')

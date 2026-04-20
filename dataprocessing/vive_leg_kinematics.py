@@ -9,14 +9,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 from vive_extraction_tools import (
     get_vive_data,
     get_reference_quaternions,
-    compute_joint_rotation,
-    find_flexion_axis,
-    compute_hinge_angle,
+    compute_axis_flexion,
+    get_axis_in_world,
 )
 
-# Calibration: stand still then perform pure flexion
-STILL_DURATION_S = 0.1   # seconds standing still  → neutral reference quaternions
-FLEX_DURATION_S  = 3.0   # seconds of pure flexion → anatomical flexion axis
+# Calibration: stand still for this duration → neutral reference quaternions
+STILL_DURATION_S = 0.1   # seconds
 
 
 def interpolate_to_common_time(data: dict, target_hz: float = 500.0) -> dict:
@@ -86,32 +84,45 @@ def interpolate_to_common_time(data: dict, target_hz: float = 500.0) -> dict:
 def compute_flexion(npz_path: str,
                     proximal: str,
                     distal: str,
+                    proximal_axis: tuple = (0, 0, 1),
+                    distal_axis: tuple = (0, 0, 1),
                     still_duration: float = STILL_DURATION_S,
-                    flex_duration: float = FLEX_DURATION_S,
                     target_hz: float = 500.0) -> dict:
     """
     Compute the flexion angle at any joint defined by a proximal and distal
-    tracker.  Works for knee (waist → right_knee), ankle (right_knee → right_foot),
-    or any other hinge pair present in the NPZ file.
+    tracker, using the angle between chosen local axes from each tracker's
+    coordinate frame.
 
-    Recording protocol at the start:
-        [0, still_duration)              — stand still → neutral reference quaternions
-        [still_duration, still_duration + flex_duration) — pure flexion → anatomical axis
+    The angle is measured as the change from the neutral standing pose captured
+    during the still calibration window:
+        flexion(t) = angle(prox_axis_world(t), dist_axis_world(t))
+                   - angle(prox_axis_world_ref, dist_axis_world_ref)
+
+    Recording protocol:
+        [0, still_duration) — stand still → neutral reference quaternions
 
     Args:
         npz_path:       Path to the NPZ file.
         proximal:       Tracker name for the proximal segment (e.g. 'waist').
         distal:         Tracker name for the distal segment (e.g. 'right_knee').
+        proximal_axis:  Local axis of the proximal tracker to track
+                        (default (0,0,1) = Z axis).
+        distal_axis:    Local axis of the distal tracker to track
+                        (default (0,0,1) = Z axis).  Use e.g. (-1,0,0) for
+                        ankle if the foot tracker's -X aligns with the shank Z.
         still_duration: Seconds to stand still at recording start (default 0.1 s).
-        flex_duration:  Seconds of pure flexion after the still phase (default 3 s).
         target_hz:      Resample rate for the common timeline (Hz).
 
     Returns:
         dict with keys:
-            't_s'          : 1-D array, time in seconds from recording start
-            'flexion_deg'  : 1-D array, flexion angle in degrees
-                             (positive = flexion, negative = hyperextension)
-            'flexion_axis' : (3,) unit vector — anatomical flexion axis from calib window
+            't_s'           : 1-D array, time in seconds from recording start
+            'flexion_deg'   : 1-D array, flexion angle in degrees relative to
+                              the neutral pose (positive = axes diverging from
+                              their reference alignment)
+            'proximal_pos'  : Nx3 world-frame positions of the proximal tracker
+            'proximal_quat' : Nx4 (w,x,y,z) world-frame quaternions, proximal
+            'distal_pos'    : Nx3 world-frame positions of the distal tracker
+            'distal_quat'   : Nx4 (w,x,y,z) world-frame quaternions, distal
     """
     data = get_vive_data(npz_path, trackers=[proximal, distal])
     refs = get_reference_quaternions(npz_path, duration=still_duration)
@@ -120,35 +131,23 @@ def compute_flexion(npz_path: str,
     t_common = interp_data[proximal]['t_s']
     t_s = t_common - t_common[0]
 
-    r_joint = compute_joint_rotation(
-        interp_data[proximal]['quaternions'],
-        interp_data[distal]['quaternions'],
-        ref_proximal=refs[proximal],
-        ref_distal=refs[distal],
+    flexion_deg = compute_axis_flexion(
+        quat_proximal   = interp_data[proximal]['quaternions'],
+        local_axis_prox = proximal_axis,
+        quat_distal     = interp_data[distal]['quaternions'],
+        local_axis_dist = distal_axis,
+        ref_quat_prox   = refs[proximal],
+        ref_quat_dist   = refs[distal],
+        degrees         = True,
     )
 
-    # Flexion axis from the pure-flexion window only.
-    # The subject stands still for still_duration, then performs a clean
-    # single-plane flexion for flex_duration. PCA on that window gives
-    # the anatomical axis, which is then held fixed for the full recording.
-    n_still      = int(np.searchsorted(t_s, still_duration))
-    n_flex_end   = int(np.searchsorted(t_s, still_duration + flex_duration))
-    flexion_axis = find_flexion_axis(r_joint[n_still:n_flex_end])
-    flexion_deg  = compute_hinge_angle(r_joint, flexion_axis, degrees=True)
-
-    # Store joint rotation as (w,x,y,z) array for downstream windowed analysis
-    quat_xyzw     = r_joint.as_quat()                             # Nx4 (x,y,z,w)
-    joint_quat    = quat_xyzw[:, [3, 0, 1, 2]]                   # Nx4 (w,x,y,z)
-
     return {
-        't_s':              t_s,
-        'flexion_deg':      flexion_deg,
-        'flexion_axis':     flexion_axis,
-        'joint_quat':       joint_quat,                            # Nx4 (w,x,y,z) calibrated relative rotation
-        'proximal_pos':     interp_data[proximal]['positions'],    # Nx3
-        'proximal_quat':    interp_data[proximal]['quaternions'],  # Nx4 (w,x,y,z) world-frame
-        'distal_pos':       interp_data[distal]['positions'],      # Nx3
-        'distal_quat':      interp_data[distal]['quaternions'],    # Nx4 (w,x,y,z) world-frame
+        't_s':           t_s,
+        'flexion_deg':   flexion_deg,
+        'proximal_pos':  interp_data[proximal]['positions'],    # Nx3
+        'proximal_quat': interp_data[proximal]['quaternions'],  # Nx4 (w,x,y,z) world-frame
+        'distal_pos':    interp_data[distal]['positions'],      # Nx3
+        'distal_quat':   interp_data[distal]['quaternions'],    # Nx4 (w,x,y,z) world-frame
     }
 
 
@@ -157,11 +156,15 @@ def compute_flexion(npz_path: str,
 # ---------------------------------------------------------------------------
 if __name__ == '__main__':
     DATASET = '/home/maisha/StairDiffusion/npz/walk_corner'
-    
+
     npz = os.path.join(DATASET, os.path.basename(DATASET) + '.npz')
 
-    knee  = compute_flexion(npz, proximal='waist',      distal='right_knee') # get flexion axis here, make it a 
-    ankle = compute_flexion(npz, proximal='right_knee', distal='right_foot')
+    # Knee: compare waist Z axis vs right_knee Z axis
+    knee  = compute_flexion(npz, proximal='waist',      distal='right_knee',
+                            proximal_axis=(0, 0, 1), distal_axis=(0, 0, 1))
+    # Ankle: compare right_knee Z axis vs right_foot -X axis
+    ankle = compute_flexion(npz, proximal='right_knee', distal='right_foot',
+                            proximal_axis=(0, 0, 1), distal_axis=(-1, 0, 0))
 
     for label, r in [('Knee', knee), ('Ankle', ankle)]:
         ang = r['flexion_deg']
