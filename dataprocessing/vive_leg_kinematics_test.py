@@ -253,7 +253,7 @@ def plot_joint_flexion(knee: dict, ankle: dict, title: str = '') -> None:
 
 
 if __name__ == '__main__':
-    DATASET = '/home/maisha/StairDiffusion/npz/calib'
+    DATASET = '/home/maisha/StairDiffusion/npz/walk_full_vid'
     
     npz = os.path.join(DATASET, os.path.basename(DATASET) + '.npz')
 
